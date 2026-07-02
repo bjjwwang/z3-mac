@@ -1,0 +1,115 @@
+name: Build Z3 Ubuntu 22.04 ARM
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-z3-ubuntu-22.04-arm.yml"
+
+permissions:
+  contents: read
+
+env:
+  Z3_VERSION: "4.15.4"
+  ARTIFACT_BASENAME: "z3-4.15.4-arm64-ubuntu-22.04"
+
+jobs:
+  build:
+    name: Build Z3 4.15.4 on ubuntu-22.04-arm
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show runner environment
+        run: |
+          lsb_release -a
+          uname -a
+          cmake --version
+          python3 --version
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            cmake \
+            ninja-build \
+            patchelf \
+            python3 \
+            unzip \
+            zip
+
+      - name: Download Z3 source
+        run: |
+          curl -fsSL \
+            -o z3.zip \
+            "https://github.com/Z3Prover/z3/archive/refs/tags/z3-${Z3_VERSION}.zip"
+          unzip -q z3.zip
+          test -d "z3-z3-${Z3_VERSION}"
+
+      - name: Configure Z3
+        run: |
+          cmake \
+            -S "z3-z3-${Z3_VERSION}" \
+            -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/z3.install" \
+            -DZ3_BUILD_LIBZ3_SHARED=ON
+
+      - name: Build and install Z3
+        run: |
+          cmake --build build --target install --parallel "$(nproc)"
+
+      - name: Create z3.obj layout
+        run: |
+          rm -rf z3.obj
+          mkdir -p z3.obj/bin z3.obj/include
+          cp -R z3.install/include/. z3.obj/include/
+
+          if [ -f z3.install/lib/libz3.so ]; then
+            cp -L z3.install/lib/libz3.so z3.obj/bin/libz3.so
+          elif [ -f z3.install/bin/libz3.so ]; then
+            cp -L z3.install/bin/libz3.so z3.obj/bin/libz3.so
+          else
+            echo "libz3.so was not produced by the build."
+            find z3.install -maxdepth 3 -type f -o -type l | sort
+            exit 1
+          fi
+
+          patchelf --set-soname libz3.so z3.obj/bin/libz3.so
+          grep "Z3_.*VERSION" z3.obj/include/z3_version.h
+          file z3.obj/bin/libz3.so
+          readelf -d z3.obj/bin/libz3.so | grep -E "SONAME|NEEDED"
+          ldd z3.obj/bin/libz3.so
+
+      - name: Package z3.obj
+        run: |
+          zip -r "${ARTIFACT_BASENAME}.zip" z3.obj
+          unzip -l "${ARTIFACT_BASENAME}.zip"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_BASENAME }}
+          path: ${{ env.ARTIFACT_BASENAME }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write artifact summary
+        run: |
+          {
+            echo "### Z3 Ubuntu ARM artifact"
+            echo
+            echo "- Z3 version: ${Z3_VERSION}"
+            echo "- Runner: ubuntu-22.04-arm"
+            echo "- Archive: ${ARTIFACT_BASENAME}.zip"
+            echo "- Layout: z3.obj/bin/libz3.so and z3.obj/include/*.h"
+            echo "- Artifact URL: ${{ steps.upload.outputs.artifact-url }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
