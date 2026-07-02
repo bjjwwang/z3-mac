@@ -237,17 +237,15 @@ jobs:
           notebooks = ["pag.ipynb", "icfg.ipynb", "svfg.ipynb", "mta.ipynb"]
           for name in notebooks:
               nb = json.loads((source_dir / name).read_text())
-              cleaned_cells = []
               for cell in nb.get("cells", []):
                   source = cell.get("source", "")
-                  if isinstance(source, list):
-                      source_text = "".join(source)
-                  else:
-                      source_text = source
-                  if "pip install pysvf" in source_text:
-                      continue
-                  cleaned_cells.append(cell)
-              nb["cells"] = cleaned_cells
+                  source_is_list = isinstance(source, list)
+                  lines = source if source_is_list else source.splitlines(keepends=True)
+                  lines = [
+                      line for line in lines
+                      if "pip install pysvf" not in line
+                  ]
+                  cell["source"] = lines if source_is_list else "".join(lines)
               (output_dir / name).write_text(json.dumps(nb))
           PY
           cd notebook-smoke
