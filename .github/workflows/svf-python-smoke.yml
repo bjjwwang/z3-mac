@@ -18,7 +18,7 @@ on:
       svf_python_ref:
         description: "SVF-Python git ref to test"
         required: true
-        default: "master"
+        default: "main"
   push:
     branches:
       - svf-python-smoke
@@ -33,7 +33,7 @@ env:
   Z3_RUN_ID: ${{ github.event.inputs.z3_run_id || '28581555262' }}
   Z3_ARTIFACT_NAME: ${{ github.event.inputs.z3_artifact_name || 'z3-4.15.4-arm64-macos-14' }}
   SVF_REF: ${{ github.event.inputs.svf_ref || 'master' }}
-  SVF_PYTHON_REF: ${{ github.event.inputs.svf_python_ref || 'master' }}
+  SVF_PYTHON_REF: ${{ github.event.inputs.svf_python_ref || 'main' }}
   XCODE_VERSION: "15.3.0"
 
 jobs:
