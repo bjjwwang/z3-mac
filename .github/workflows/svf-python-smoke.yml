@@ -151,7 +151,7 @@ jobs:
       - name: Install Python build dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install build wheel setuptools pybind11
+          python3 -m pip install build wheel setuptools pybind11 jupyter nbconvert ipykernel
           echo "PYBIND11_DIR=$(python3 -m pybind11 --cmakedir)" >> "${GITHUB_ENV}"
 
       - name: Clone SVF-Python
@@ -223,6 +223,41 @@ jobs:
               raise SystemExit("ICFG has no nodes")
           PY
 
+      - name: Execute SVF-Python demo notebooks
+        run: |
+          rm -rf notebook-smoke executed-notebooks
+          mkdir -p notebook-smoke executed-notebooks
+          cp SVF-Python/demo/*.ll notebook-smoke/
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          source_dir = Path("SVF-Python/demo")
+          output_dir = Path("notebook-smoke")
+          notebooks = ["pag.ipynb", "icfg.ipynb", "svfg.ipynb", "mta.ipynb"]
+          for name in notebooks:
+              nb = json.loads((source_dir / name).read_text())
+              cleaned_cells = []
+              for cell in nb.get("cells", []):
+                  source = cell.get("source", "")
+                  if isinstance(source, list):
+                      source_text = "".join(source)
+                  else:
+                      source_text = source
+                  if "pip install pysvf" in source_text:
+                      continue
+                  cleaned_cells.append(cell)
+              nb["cells"] = cleaned_cells
+              (output_dir / name).write_text(json.dumps(nb))
+          PY
+          cd notebook-smoke
+          python3 -m jupyter nbconvert \
+            --execute \
+            --to notebook \
+            --output-dir "${GITHUB_WORKSPACE}/executed-notebooks" \
+            --ExecutePreprocessor.timeout=600 \
+            pag.ipynb icfg.ipynb svfg.ipynb mta.ipynb
+
       - name: Upload smoke artifacts
         id: upload-smoke-artifacts
         if: always()
@@ -234,6 +269,7 @@ jobs:
             svf-build.log
             svf-z3-linkage.txt
             pysvf-linkage.txt
+            executed-notebooks/*.ipynb
           if-no-files-found: warn
           retention-days: 30
 
