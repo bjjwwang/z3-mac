@@ -198,11 +198,33 @@ jobs:
             exit 1
           fi
 
-          cd SVF-Python/test_cases
-          python3 test.py
-          python3 test2.py
+          python3 - <<'PY'
+          import pathlib
+          import pysvf
+
+          bitcode = pathlib.Path("SVF-Python/test_cases/BASIC_array_2d_0-0.c.bc").resolve()
+          pysvf.buildSVFModule([
+              str(bitcode),
+              "-model-arrays=true",
+              "-pre-field-sensitive=false",
+              "-model-consts=true",
+              "-stat=false",
+          ])
+          pag = pysvf.getPAG()
+          icfg = pag.getICFG()
+          pag_nodes = pag.getSVFVarNum()
+          icfg_nodes = sum(1 for _ in icfg)
+          print("smoke bitcode:", bitcode)
+          print("SVFIR vars:", pag_nodes)
+          print("ICFG nodes:", icfg_nodes)
+          if pag_nodes <= 0:
+              raise SystemExit("SVFIR has no variables")
+          if icfg_nodes <= 0:
+              raise SystemExit("ICFG has no nodes")
+          PY
 
       - name: Upload smoke artifacts
+        id: upload-smoke-artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -214,3 +236,12 @@ jobs:
             pysvf-linkage.txt
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## SVF-Python smoke"
+            echo
+            echo "- Artifact URL: ${{ steps.upload-smoke-artifacts.outputs.artifact-url }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
