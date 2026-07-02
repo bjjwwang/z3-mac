@@ -1,0 +1,216 @@
+name: SVF Python smoke with prebuilt macOS Z3
+
+on:
+  workflow_dispatch:
+    inputs:
+      z3_run_id:
+        description: "z3-mac workflow run id that uploaded the Z3 artifact"
+        required: true
+        default: "28581555262"
+      z3_artifact_name:
+        description: "Z3 artifact name from the z3-mac run"
+        required: true
+        default: "z3-4.15.4-arm64-macos-14"
+      svf_ref:
+        description: "SVF git ref to test"
+        required: true
+        default: "master"
+      svf_python_ref:
+        description: "SVF-Python git ref to test"
+        required: true
+        default: "master"
+  push:
+    branches:
+      - svf-python-smoke
+    paths:
+      - ".github/workflows/svf-python-smoke.yml"
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  Z3_RUN_ID: ${{ github.event.inputs.z3_run_id || '28581555262' }}
+  Z3_ARTIFACT_NAME: ${{ github.event.inputs.z3_artifact_name || 'z3-4.15.4-arm64-macos-14' }}
+  SVF_REF: ${{ github.event.inputs.svf_ref || 'master' }}
+  SVF_PYTHON_REF: ${{ github.event.inputs.svf_python_ref || 'master' }}
+  XCODE_VERSION: "15.3.0"
+
+jobs:
+  smoke:
+    name: Build SVF and SVF-Python on macos-14
+    runs-on: macos-14
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Show runner environment
+        run: |
+          sw_vers
+          uname -a
+          xcodebuild -version
+          cmake --version
+          python3 --version
+          gh --version
+
+      - name: Download prebuilt Z3 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p z3-artifact
+          gh run download "${Z3_RUN_ID}" \
+            --repo bjjwwang/z3-mac \
+            --name "${Z3_ARTIFACT_NAME}" \
+            --dir z3-artifact
+          unzip -q "z3-artifact/${Z3_ARTIFACT_NAME}.zip" -d "${GITHUB_WORKSPACE}"
+          test -f "${GITHUB_WORKSPACE}/z3.obj/bin/libz3.dylib"
+          test -f "${GITHUB_WORKSPACE}/z3.obj/include/z3_version.h"
+          grep "Z3_.*VERSION" "${GITHUB_WORKSPACE}/z3.obj/include/z3_version.h"
+          otool -D "${GITHUB_WORKSPACE}/z3.obj/bin/libz3.dylib"
+          otool -L "${GITHUB_WORKSPACE}/z3.obj/bin/libz3.dylib"
+          echo "Z3_DIR=${GITHUB_WORKSPACE}/z3.obj" >> "${GITHUB_ENV}"
+
+      - name: Clone SVF
+        run: |
+          git clone --depth=1 https://github.com/SVF-tools/SVF.git SVF
+          cd SVF
+          git fetch --depth=1 origin "${SVF_REF}"
+          git checkout FETCH_HEAD
+
+      - name: Prepare SVF to require prebuilt Z3
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          build_sh = Path("SVF/build.sh")
+          text = build_sh.read_text()
+          if "brew install z3" not in text:
+              raise SystemExit("Expected brew install z3 guard target was not found")
+          text = text.replace(
+              "brew install z3",
+              'echo "ERROR: SVF build attempted to install Homebrew z3" >&2; exit 88'
+          )
+          build_sh.write_text(text)
+
+          find_z3 = Path("SVF/cmake/Modules/FindZ3.cmake")
+          text = find_z3.read_text()
+          old = "find_package(Z3 CONFIG QUIET HINTS ${Z3_HOME} $ENV{Z3_HOME} ${Z3_DIR} $ENV{Z3_DIR})"
+          if old not in text:
+              raise SystemExit("Expected FindZ3 CONFIG lookup was not found")
+          text = text.replace(old, "set(Z3_FOUND FALSE)")
+          text = text.replace(
+              "PATH_SUFFIXES bin lib ${CMAKE_INSTALL_BINDIR} ${CMAKE_INSTALL_LIBDIR}\n  )",
+              "PATH_SUFFIXES bin lib ${CMAKE_INSTALL_BINDIR} ${CMAKE_INSTALL_LIBDIR}\n    NO_DEFAULT_PATH\n  )",
+              1,
+          )
+          text = text.replace(
+              "PATH_SUFFIXES include ${CMAKE_INSTALL_INCLUDEDIR}\n  )",
+              "PATH_SUFFIXES include ${CMAKE_INSTALL_INCLUDEDIR}\n    NO_DEFAULT_PATH\n  )",
+              1,
+          )
+          find_z3.write_text(text)
+          PY
+
+      - name: Build SVF with prebuilt Z3
+        run: |
+          set -o pipefail
+          cd SVF
+          export Z3_DIR="${GITHUB_WORKSPACE}/z3.obj"
+          source ./build.sh dyn_lib 2>&1 | tee "${GITHUB_WORKSPACE}/svf-build.log"
+
+      - name: Verify SVF Z3 linkage
+        run: |
+          {
+            echo "### libSvfCore"
+            otool -L SVF/Release-build/lib/libSvfCore.3.4.dylib
+            echo
+            echo "### libSvfLLVM"
+            otool -L SVF/Release-build/lib/libSvfLLVM.3.4.dylib
+          } | tee svf-z3-linkage.txt
+
+          grep -F "Manually found Z3 (libs: ${Z3_DIR}/bin/libz3.dylib" svf-build.log
+          if grep -E "/opt/homebrew/.*/z3|libz3\\.4\\." svf-z3-linkage.txt; then
+            echo "SVF linked against a Homebrew/versioned Z3 dylib; expected libz3.dylib from z3.obj."
+            exit 1
+          fi
+
+          echo "LLVM_DIR=${GITHUB_WORKSPACE}/SVF/llvm-21.1.0.obj" >> "${GITHUB_ENV}"
+          echo "SVF_DIR=${GITHUB_WORKSPACE}/SVF" >> "${GITHUB_ENV}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python build dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build wheel setuptools pybind11
+          echo "PYBIND11_DIR=$(python3 -m pybind11 --cmakedir)" >> "${GITHUB_ENV}"
+
+      - name: Clone SVF-Python
+        run: |
+          git clone --depth=1 https://github.com/SVF-tools/SVF-Python.git SVF-Python
+          cd SVF-Python
+          git fetch --depth=1 origin "${SVF_PYTHON_REF}"
+          git checkout FETCH_HEAD
+
+      - name: Build SVF-Python wheel
+        run: |
+          cd SVF-Python
+          rm -rf build dist pysvf.egg-info
+          export CMAKE_BUILD_TYPE=Release
+          VERSION=0.0.0.dev0 \
+          SVF_DIR="${SVF_DIR}" \
+          LLVM_DIR="${LLVM_DIR}" \
+          Z3_DIR="${Z3_DIR}" \
+          PYBIND11_DIR="${PYBIND11_DIR}" \
+          python3 -m build --wheel
+
+      - name: Install and smoke test pysvf
+        run: |
+          python3 -m pip install --force-reinstall SVF-Python/dist/*.whl
+          python3 - <<'PY'
+          import pathlib
+          import pysvf
+
+          package_dir = pathlib.Path(pysvf.__file__).parent
+          extension = next(package_dir.glob("pysvf*.so"))
+          print("pysvf package:", package_dir)
+          print("pysvf extension:", extension)
+          PY
+
+          PYSVF_SO=$(python3 - <<'PY'
+          import pathlib
+          import pysvf
+          print(next(pathlib.Path(pysvf.__file__).parent.glob("pysvf*.so")))
+          PY
+          )
+          otool -L "${PYSVF_SO}" | tee pysvf-linkage.txt
+          if grep -E "/opt/homebrew/.*/z3|libz3\\.4\\." pysvf-linkage.txt; then
+            echo "pysvf linked against a Homebrew/versioned Z3 dylib; expected bundled libz3.dylib."
+            exit 1
+          fi
+
+          cd SVF-Python/test_cases
+          python3 test.py
+          python3 test2.py
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: svf-python-smoke-macos-z3-4.15.4
+          path: |
+            SVF-Python/dist/*.whl
+            svf-build.log
+            svf-z3-linkage.txt
+            pysvf-linkage.txt
+          if-no-files-found: warn
+          retention-days: 30
